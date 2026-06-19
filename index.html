@@ -1,34 +1,525 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="zh-CN">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>给你的表白</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>💕 Love Popup</title>
 <style>
-    body {
-        font-family: sans-serif;
-        background: #ffe6e6;
-        text-align: center;
-        padding: 50px 20px;
-    }
-    h1 { color: #ff4d88; font-size: 32px; }
-    p { font-size: 18px; color: #444; line-height: 1.6; }
-    button {
-        margin-top: 30px;
-        padding: 12px 28px;
-        background: #ff4d88;
-        border: none;
-        color: white;
-        font-size: 18px;
-        border-radius: 8px;
-        cursor: pointer;
-    }
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#1a0a1a;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+canvas{display:block;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+
+/* 开场屏 */
+#startScreen{
+  position:fixed;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;
+  background:radial-gradient(ellipse at 50% 60%,#2d1b2e 0%,#1a0a1a 70%);
+  z-index:10;transition:opacity .8s ease;cursor:pointer;
+}
+#startScreen.hidden{opacity:0;pointer-events:none}
+#startScreen .emoji{
+  font-size:clamp(48px,15vw,80px);
+  animation:heartbeat 1.2s ease-in-out infinite;
+}
+#startScreen .text{
+  color:#ff8fa3;font-size:clamp(16px,4.5vw,22px);
+  margin-top:20px;letter-spacing:2px;
+  animation:fadeSlide 2s ease-in-out infinite alternate;
+}
+@keyframes heartbeat{
+  0%,100%{transform:scale(1)}
+  15%{transform:scale(1.15)}
+  30%{transform:scale(1)}
+  45%{transform:scale(1.1)}
+  60%{transform:scale(1)}
+}
+@keyframes fadeSlide{
+  0%{opacity:.5;transform:translateY(4px)}
+  100%{opacity:1;transform:translateY(-4px)}
+}
+
+/* 状态栏 */
+#statusBar{
+  position:fixed;top:0;left:0;right:0;
+  padding:10px 16px;text-align:center;
+  color:#ff8fa3;font-size:14px;z-index:5;
+  background:linear-gradient(to bottom,rgba(26,10,26,.8),transparent);
+  pointer-events:none;transition:opacity .5s;
+}
+#statusBar.hidden{opacity:0}
 </style>
 </head>
-
 <body>
-    <h1>我有一句话想对你说</h1>
-    <p>遇见你之后，世界都变得温柔起来。</p>
-    <button onclick="alert('我喜欢你！')">点我一下</button>
+
+<!-- 开场屏 -->
+<div id="startScreen">
+  <div class="emoji">💕</div>
+  <div class="text">点击屏幕开始</div>
+</div>
+
+<!-- 状态提示 -->
+<div id="statusBar" class="hidden"></div>
+
+<!-- 动画画布 -->
+<canvas id="canvas"></canvas>
+
+<script>
+// ═══ 常量 ═══════════════════════════════════════════════
+
+const TIPS = [
+  "我想你了","别熬夜哦","要开心呀","我爱你","早点休息",
+  "记得吃饭","多喝热水","你最棒啦","晚安好梦","I LOVE YOU",
+  "照顾好自己","想见到你","一直在等你","别太累了"
+];
+
+const HEART_N = 50;
+const FULL_N = 60;
+
+// ═══ 状态 ═══════════════════════════════════════════════
+
+let W, H, dpr;
+let phase = 'idle';  // idle | heart | wait_fullscreen | fullscreen | done
+let animId = null;
+let lastTime = 0;
+let popups = [];     // {x,y,w,h,text,color,alpha,vy,life,maxLife,targetAlpha,appeared,permanent}
+let particles = [];  // {x,y,vx,vy,r,color,alpha,life}
+let bgParticles = []; // 背景光斑
+let spawnTimer = 0;
+let spawnIndex = 0;
+let heartPoints = [];
+let fullPositions = [];
+let lastHeartPopup = null;
+let autoFullscreenTimer = null;
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+// ═══ Canvas 适配 ═════════════════════════════════════════
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  initBgParticles();
+}
+
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+
+// ═══ 心形数学 ═══════════════════════════════════════════
+
+function heartPoint(t) {
+  const x = 16 * Math.pow(Math.sin(t), 3);
+  const y = 13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t);
+  return {x, y};
+}
+
+function generateHeartPoints(n) {
+  const scale = Math.min(W, H) * 0.024;
+  const cx = W / 2, cy = H * 0.45;
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const t = (i / n) * 2 * Math.PI;
+    const p = heartPoint(t);
+    pts.push({ x: cx + p.x * scale, y: cy - p.y * scale });
+  }
+  return pts;
+}
+
+function generateFullPositions(n) {
+  const pts = [];
+  const pad = 10;
+  for (let i = 0; i < n; i++) {
+    const w = 100 + Math.random() * 60;
+    const h = 36 + Math.random() * 16;
+    pts.push({
+      x: pad + Math.random() * (W - w - pad * 2),
+      y: pad + Math.random() * (H - h - pad * 2),
+      w, h
+    });
+  }
+  return pts;
+}
+
+// ═══ 颜色工具 ═══════════════════════════════════════════
+
+function heartColor() {
+  const r = 210 + Math.floor(Math.random() * 46);
+  const g = 80 + Math.floor(Math.random() * 81);
+  const b = 100 + Math.floor(Math.random() * 71);
+  return {r, g, b};
+}
+
+function warmColor() {
+  const palette = [
+    {r:255,g:110,b:130},{r:255,g:150,b:100},{r:255,g:180,b:140},
+    {r:240,g:100,b:160},{r:220,g:130,b:200},{r:255,g:130,b:180},
+    {r:200,g:120,b:220},{r:255,g:160,b:160},{r:255,g:200,b:150},
+  ];
+  return palette[Math.floor(Math.random() * palette.length)];
+}
+
+function rgbStr(c, a) {
+  return `rgba(${c.r},${c.g},${c.b},${a})`;
+}
+
+// ═══ 粒子系统 ═══════════════════════════════════════════
+
+function spawnBurst(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 30 + Math.random() * 80;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 20,
+      r: 2 + Math.random() * 4,
+      color: color || heartColor(),
+      alpha: 1,
+      life: 0.8 + Math.random() * 0.8
+    });
+  }
+}
+
+function spawnHeartBurst(x, y) {
+  for (let i = 0; i < 6; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 20 + Math.random() * 50;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 30,
+      r: 3 + Math.random() * 3,
+      color: {r:255, g:100 + Math.floor(Math.random()*80), b:130},
+      alpha: 1,
+      life: 1 + Math.random() * 0.6,
+      isHeart: true
+    });
+  }
+}
+
+function initBgParticles() {
+  bgParticles = [];
+  const count = Math.min(30, Math.floor(W * H / 15000));
+  for (let i = 0; i < count; i++) {
+    bgParticles.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: 1.5 + Math.random() * 3,
+      alpha: 0.1 + Math.random() * 0.25,
+      vx: (Math.random() - 0.5) * 8,
+      vy: (Math.random() - 0.5) * 8,
+      pulse: Math.random() * Math.PI * 2
+    });
+  }
+}
+
+// ═══ 弹窗对象 ═══════════════════════════════════════════
+
+function createPopup(x, y, text, color, size, opts) {
+  const w = (size && size.w) || (90 + Math.random() * 70);
+  const h = (size && size.h) || (34 + Math.random() * 14);
+  const fontSize = Math.min(Math.max(11, W * 0.028), 14);
+  const life = (opts && opts.maxLife) || (10 + Math.random() * 6);
+  const popup = {
+    x, y, w, h, text, color, fontSize,
+    alpha: 0,
+    targetAlpha: 0.92,
+    vy: -4 + Math.random() * 8,
+    life: 0,
+    maxLife: life,
+    appeared: false,
+    permanent: !!(opts && opts.permanent)
+  };
+  popups.push(popup);
+  return popup;
+}
+
+// ═══ 渲染 ═══════════════════════════════════════════════
+
+function drawRoundedRect(x, y, w, h, r, fillStyle) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+  ctx.fillStyle = fillStyle;
+  ctx.fill();
+}
+
+function drawHeartShape(x, y, size) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(size / 32, size / 32);
+  ctx.beginPath();
+  ctx.moveTo(0, -6);
+  ctx.bezierCurveTo(-8, -16, -20, -6, -16, 6);
+  ctx.lineTo(0, 18);
+  ctx.lineTo(16, 6);
+  ctx.bezierCurveTo(20, -6, 8, -16, 0, -6);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawBackground(dt) {
+  const grad = ctx.createRadialGradient(W/2, H*0.45, 0, W/2, H*0.45, Math.max(W, H)*0.7);
+  grad.addColorStop(0, '#2d1b2e');
+  grad.addColorStop(0.5, '#221224');
+  grad.addColorStop(1, '#0d0510');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  bgParticles.forEach(p => {
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.pulse += dt * 1.5;
+    if (p.x < -10) p.x = W + 10;
+    if (p.x > W + 10) p.x = -10;
+    if (p.y < -10) p.y = H + 10;
+    if (p.y > H + 10) p.y = -10;
+    const a = p.alpha * (0.6 + 0.4 * Math.sin(p.pulse));
+    const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r * 4);
+    g.addColorStop(0, `rgba(255,140,180,${a})`);
+    g.addColorStop(1, 'rgba(255,140,180,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r * 4, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+function drawPopups(dt) {
+  popups.forEach(p => {
+    if (!p.permanent) {
+      p.life += dt;
+      p.y += p.vy * dt;
+    }
+    if (p.alpha < p.targetAlpha) {
+      p.alpha = Math.min(p.alpha + dt * 2.5, p.targetAlpha);
+    }
+    if (!p.permanent) {
+      const fadeStart = p.maxLife - 1.5;
+      if (p.life > fadeStart) {
+        p.alpha = Math.max(0, p.targetAlpha * (1 - (p.life - fadeStart) / 1.5));
+      }
+    }
+    if (p.alpha <= 0) return;
+
+    const a = p.alpha;
+    ctx.shadowColor = rgbStr(p.color, 0.4 * a);
+    ctx.shadowBlur = 8;
+    ctx.shadowOffsetY = 2;
+
+    const bg = rgbStr(p.color, a);
+    drawRoundedRect(p.x, p.y, p.w, p.h, 8, bg);
+
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetY = 0;
+
+    ctx.fillStyle = `rgba(255,255,255,${a})`;
+    ctx.font = `bold ${p.fontSize}px "PingFang SC","Microsoft YaHei",sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(p.text, p.x + p.w / 2, p.y + p.h / 2);
+  });
+  popups = popups.filter(p => p.permanent || p.alpha > 0);
+}
+
+function drawParticles(dt) {
+  particles.forEach(p => {
+    p.life -= dt;
+    p.alpha = Math.max(0, p.life / 1.5);
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vy += 30 * dt;
+    if (p.alpha <= 0) return;
+
+    ctx.fillStyle = rgbStr(p.color, p.alpha);
+    if (p.isHeart) {
+      drawHeartShape(p.x, p.y, p.r * 3);
+    } else {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+  particles = particles.filter(p => p.life > 0);
+}
+
+// ═══ 主循环 ═════════════════════════════════════════════
+
+function animate(ts) {
+  if (!lastTime) lastTime = ts;
+  let dt = (ts - lastTime) / 1000;
+  lastTime = ts;
+  dt = Math.min(dt, 0.05);
+
+  ctx.clearRect(0, 0, W, H);
+  drawBackground(dt);
+  drawPopups(dt);
+  drawParticles(dt);
+
+  if (phase === 'heart' || phase === 'fullscreen') {
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) {
+      doSpawn();
+    }
+  }
+
+  animId = requestAnimationFrame(animate);
+}
+
+// ═══ 弹窗生成逻辑 ═══════════════════════════════════════
+
+function doSpawn() {
+  if (phase === 'heart') {
+    if (spawnIndex < heartPoints.length) {
+      const pt = heartPoints[spawnIndex];
+      const c = heartColor();
+      const isLast = (spawnIndex === heartPoints.length - 1);
+      const tip = isLast ? '我爱你' : TIPS[Math.floor(Math.random() * TIPS.length)];
+      const opts = isLast ? {maxLife: 100, permanent: true} : null;
+      const popup = createPopup(pt.x - 55, pt.y - 20, tip, c, {w:110, h:40}, opts);
+      if (isLast) {
+        lastHeartPopup = popup;
+      }
+      spawnHeartBurst(pt.x, pt.y);
+      spawnTimer = 0.15;
+      spawnIndex++;
+    } else {
+      phase = 'wait_fullscreen';
+      showStatus('✨ 点击"我爱你"弹窗或等待4秒触发满屏效果...');
+      autoFullscreenTimer = setTimeout(() => {
+        if (phase === 'wait_fullscreen' && lastHeartPopup) {
+          triggerFullscreen(lastHeartPopup);
+        }
+      }, 4000);
+    }
+  } else if (phase === 'fullscreen') {
+    if (spawnIndex < fullPositions.length) {
+      const pos = fullPositions[spawnIndex];
+      const c = warmColor();
+      const tip = TIPS[Math.floor(Math.random() * TIPS.length)];
+      createPopup(pos.x, pos.y, tip, c, {w: pos.w, h: pos.h});
+      spawnBurst(pos.x + pos.w/2, pos.y + pos.h/2, c, 5);
+      spawnTimer = 0.08;
+      spawnIndex++;
+    } else {
+      phase = 'done';
+      showStatus('💕 全部弹窗已展示~');
+      setTimeout(() => hideStatus(), 4000);
+    }
+  }
+}
+
+// ═══ 满屏触发函数 ═════════════════════════════════════════
+
+function triggerFullscreen(popup) {
+  if (autoFullscreenTimer) {
+    clearTimeout(autoFullscreenTimer);
+    autoFullscreenTimer = null;
+  }
+
+  phase = 'fullscreen';
+  spawnIndex = 0;
+  fullPositions = generateFullPositions(FULL_N);
+  spawnTimer = 0;
+  showStatus('🌟 满屏弹窗中...');
+
+  spawnBurst(popup.x + popup.w/2, popup.y + popup.h/2, popup.color, 20);
+  spawnHeartBurst(popup.x + popup.w/2, popup.y + popup.h/2);
+}
+
+// ═══ 状态栏 ═════════════════════════════════════════════
+
+function showStatus(text) {
+  const el = document.getElementById('statusBar');
+  el.textContent = text;
+  el.classList.remove('hidden');
+}
+function hideStatus() {
+  document.getElementById('statusBar').classList.add('hidden');
+}
+
+// ═══ 启动 ═══════════════════════════════════════════════
+
+function start() {
+  document.getElementById('startScreen').classList.add('hidden');
+  resize();
+
+  if (autoFullscreenTimer) {
+    clearTimeout(autoFullscreenTimer);
+    autoFullscreenTimer = null;
+  }
+
+  heartPoints = generateHeartPoints(HEART_N);
+  spawnIndex = 0;
+  spawnTimer = 0.3;
+  phase = 'heart';
+  showStatus('💖 心形动画中...');
+
+  if (!animId) {
+    lastTime = 0;
+    animId = requestAnimationFrame(animate);
+  }
+}
+
+// 点击/触摸开始
+document.getElementById('startScreen').addEventListener('click', start);
+document.getElementById('startScreen').addEventListener('touchend', e => {
+  e.preventDefault();
+  start();
+});
+
+// 初始化
+resize();
+
+// ═══ 点击事件处理 ═════════════════════════════════════════
+
+function handleClick(clientX, clientY) {
+  if (!lastHeartPopup || !lastHeartPopup.permanent) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const clickX = clientX - rect.left;
+  const clickY = clientY - rect.top;
+
+  const p = lastHeartPopup;
+  if (clickX >= p.x && clickX <= p.x + p.w && clickY >= p.y && clickY <= p.y + p.h) {
+    triggerFullscreen(p);
+  }
+}
+
+canvas.addEventListener('click', (e) => {
+  handleClick(e.clientX, e.clientY);
+});
+
+canvas.addEventListener('touchend', (e) => {
+  if (!lastHeartPopup || !lastHeartPopup.permanent) return;
+  const touch = e.changedTouches[0];
+  const rect = canvas.getBoundingClientRect();
+  const clickX = touch.clientX - rect.left;
+  const clickY = touch.clientY - rect.top;
+  const p = lastHeartPopup;
+  if (clickX >= p.x && clickX <= p.x + p.w && clickY >= p.y && clickY <= p.y + p.h) {
+    e.preventDefault();
+    triggerFullscreen(p);
+  }
+});
+</script>
 </body>
 </html>
